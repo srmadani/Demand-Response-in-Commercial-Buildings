@@ -10,6 +10,7 @@ import os, shutil
 from ctrl import CTRL
 import argparse
 import pickle
+import plotly.graph_objects as go
 
 def act_clipper(a):
 	if a>1:
@@ -130,22 +131,18 @@ def str2bool(v):
 		raise
 
 
-def evaluate_policy(env, agent, turns):
-	total_scores = 0
-	for j in range(turns):
-		s = env.reset()
-		done = False
-		acts = []
-		while not done:
-			a, logprob_a = agent.select_action(s, deterministic=True) # Take deterministic actions when evaluation
-			act = act_clipper(a)
-			s_next, r, done, _ = env.step(act)
-
-			total_scores += r
-			s = s_next
-			acts.append(a)
-
-	return total_scores/turns, acts
+def evaluate_policy(env, model, mode='validation'):
+	if mode == 'validation':
+		week_num = 7
+	else:
+		week_num = 8
+	s, done, scores= env.reset(week_num = week_num), False, 0
+	while not done:
+		a = model.select_action(s, deterministic = True)
+		s_next, r, done, _ = env.step(act_clipper(a[0]))
+		scores += r
+		s = s_next
+	return scores, env.load, env.cost
 	
 class PPO_agent(object):
 	def __init__(self, **kwargs):
@@ -309,21 +306,22 @@ parser.add_argument('--entropy_coef', type=float, default=1e-3, help='Entropy co
 parser.add_argument('--entropy_coef_decay', type=float, default=0.99, help='Decay rate of entropy_coef')
 opt = parser.parse_args()
 opt.dvc = torch.device(opt.dvc) # from str to torch.device
-print(opt)
+# print(opt)
 
 
-def main():
-	# Build Training Env and Evaluation Env
-	EnvName = ['CTRL_PPO']
-	BriefEnvName = ['CTRL_PPO']
-	env = CTRL()
-	eval_env = CTRL()
+def main(beta=0.1, render=False, compare=False):
+	EnvName = [f'CTRL_PPO_beta_{beta}']
+	BrifEnvName = [f'CTRL_PPO_{beta}']
+
+	# Build Env
+	env = CTRL(beta=beta)
+	eval_env = CTRL(beta=beta)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.shape[0]
 	opt.max_action = 1
-	opt.max_steps = 7*7*12
-	print('Env:',EnvName[opt.EnvIdex],'  state_dim:',opt.state_dim,'  action_dim:',opt.action_dim,
-		  '  max_a:',opt.max_action,'  min_a:',env.action_space.low[0], 'max_steps', opt.max_steps)
+	opt.max_steps = 7*24*12
+	# print('Env:',EnvName[opt.EnvIdex],'  state_dim:',opt.state_dim,'  action_dim:',opt.action_dim,
+	# 	  '  max_a:',opt.max_action,'  min_a:',env.action_space.low[0], 'max_steps', opt.max_steps)
 
 	# Seed Everything
 	env_seed = opt.seed
@@ -332,7 +330,7 @@ def main():
 	torch.cuda.manual_seed(opt.seed)
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
-	print("Random Seed: {}".format(opt.seed))
+	# print("Random Seed: {}".format(opt.seed))
 
 	# Beta dist maybe need larger learning rate, Sometimes helps
 	# if Dist[distnum] == 'Beta' :
@@ -341,16 +339,23 @@ def main():
 
 	if not os.path.exists('model'): os.mkdir('model')
 	agent = PPO_agent(**vars(opt)) # transfer opt to dictionary, and use it to init PPO_agent
-	if opt.Loadmodel: agent.load(opt.ModelIdex)
+	if opt.Loadmodel: agent.load(BrifEnvName[opt.EnvIdex])
 
-	if opt.render:
-		while True:
-			ep_r, _ = evaluate_policy(env, agent, opt.max_action, 1)
-			print(f'Env:{EnvName[opt.EnvIdex]}, Episode Reward:{ep_r}')
+	if render:
+		agent.load(BrifEnvName[opt.EnvIdex])
+		res = {}
+		res['score'], res['load'], res['cost'] = evaluate_policy(eval_env, agent, mode='test')
+		print(f"EnvName:{BrifEnvName[opt.EnvIdex]}, score: {res['score']}, cost: {res['cost']}")
+		with open(f'res/{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+			pickle.dump(res, file)
+	elif compare:
+		agent.load(BrifEnvName[opt.EnvIdex])
+		score, _, _ = evaluate_policy(eval_env, agent, mode='validation')
+		return score
 	else:
 		total_steps, traj_lenth, act, rew, best_score = 0, 0, [], [], -np.inf
 		while total_steps < opt.Max_train_steps:
-			s = env.reset()
+			s = env.reset(week_num=np.random.randint(1,7))
 			done = False
 
 			'''Interact & trian'''
@@ -373,22 +378,20 @@ def main():
 
 				'''Record & log'''
 				if total_steps % opt.eval_interval == 0:
-					score, acts = evaluate_policy(eval_env, agent, turns=3) # evaluate the policy for 3 times, and get averaged result
+					score, _, _ = evaluate_policy(eval_env, agent, mode='validation') # evaluate the policy for 3 times, and get averaged result
 					rew.append(np.array(score))
-					if (total_steps) % (10*opt.eval_interval) == 0:
-						act.append(acts)
 					if score > best_score:
-						agent.save(BriefEnvName[opt.EnvIdex])
+						agent.save(BrifEnvName[opt.EnvIdex])
 						best_score = score
 					print('EnvName:',EnvName[opt.EnvIdex],'seed:',opt.seed,'steps: {}k'.format(int(total_steps/1000)),'score:', score)
 
 
 		env.close()
 		eval_env.close()
-	with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(act, file)
-	with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(rew, file)
+	# with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(act, file)
+	# with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(rew, file)
 
 
 if __name__ == '__main__':

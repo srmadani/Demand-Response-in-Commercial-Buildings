@@ -9,6 +9,7 @@ from datetime import datetime
 from ctrl import CTRL
 import argparse
 import pickle
+import plotly.graph_objects as go
 
 def act_clipper(a):
 	if a>1:
@@ -50,18 +51,18 @@ class Q_Critic(nn.Module):
 		q = self.l3(q)
 		return q
 
-def evaluate_policy(env, model, turns=3, render=False):
-	scores = 0
-	for j in range(turns):
-		s, done, acts = env.reset(), False, []
-		while not done:
-			a = model.select_action(s, deterministic = True)
-			s_next, r, done, _ = env.step(act_clipper(a))
-			scores += r
-			s = s_next
-			acts.append(a)
-			if render: env.render()
-	return scores/turns, acts
+def evaluate_policy(env, model, mode='validation'):
+	if mode == 'validation':
+		week_num = 7
+	else:
+		week_num = 8
+	s, done, scores= env.reset(week_num = week_num), False, 0
+	while not done:
+		a = model.select_action(s, deterministic = True)
+		s_next, r, done, _ = env.step(act_clipper(a))
+		scores += r
+		s = s_next
+	return scores, env.load, env.cost
 
 
 #Just ignore this function~
@@ -186,28 +187,28 @@ parser.add_argument('--eval_interval', type=int, default=2e3, help='Model evalua
 
 parser.add_argument('--gamma', type=float, default=0.97, help='Discounted Factor')
 parser.add_argument('--net_width', type=int, default=400, help='Hidden net width, s_dim-400-300-a_dim')
-parser.add_argument('--a_lr', type=float, default=2e-3, help='Learning rate of actor')
-parser.add_argument('--c_lr', type=float, default=2e-3, help='Learning rate of critic')
+parser.add_argument('--a_lr', type=float, default=2e-4, help='Learning rate of actor')
+parser.add_argument('--c_lr', type=float, default=2e-4, help='Learning rate of critic')
 parser.add_argument('--batch_size', type=int, default=128, help='batch_size of training')
 parser.add_argument('--random_steps', type=int, default=5e3, help='random steps before trianing')
-parser.add_argument('--noise', type=float, default=0.15, help='exploring noise')
+parser.add_argument('--noise', type=float, default=0.05, help='exploring noise')
 opt = parser.parse_args()
 opt.dvc = torch.device(opt.dvc) # from str to torch.device
-print(opt)
+# print(opt)
 
 
-def main():
-	EnvName = ['CTRL_DDPG']
-	BrifEnvName = ['CTRL_DDPG']
+def main(beta=0.1, render = False, compare=False):
+	EnvName = [f'CTRL_DDPG_beta_{beta}']
+	BrifEnvName = [f'CTRL_DDPG_{beta}']
 
 	# Build Env
-	env = CTRL()
-	eval_env = CTRL()
+	env = CTRL(beta=beta)
+	eval_env = CTRL(beta=beta)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.shape[0]
 	opt.max_action = 1
-	print(f'Env:{EnvName[opt.EnvIdex]}  state_dim:{opt.state_dim}  action_dim:{opt.action_dim}  '
-		  f'max_a:{opt.max_action}  min_a:{env.action_space.low[0]}  max_e_steps:{env._max_episode_steps}')
+	# print(f'Env:{EnvName[opt.EnvIdex]}  state_dim:{opt.state_dim}  action_dim:{opt.action_dim} '
+	# 	  f'max_a:{opt.max_action}  min_a:{env.action_space.low[0]} max_steps: {7*12*24}')
 
 	# Seed Everything
 	env_seed = opt.seed
@@ -216,25 +217,33 @@ def main():
 	torch.cuda.manual_seed(opt.seed)
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
-	print("Random Seed: {}".format(opt.seed))
+	# print("Random Seed: {}".format(opt.seed))
 
 	# Build DRL model
 	if not os.path.exists('model'): os.mkdir('model')
 	agent = DDPG_agent(**vars(opt)) # var: transfer argparse to dictionary
-	if opt.Loadmodel: agent.load(BrifEnvName[opt.EnvIdex], opt.ModelIdex)
+	if opt.Loadmodel: agent.load(BrifEnvName[opt.EnvIdex])
 
-	if opt.render:
-		while True:
-			score, _ = evaluate_policy(env, agent, turns=1)
-			print('EnvName:', BrifEnvName[opt.EnvIdex], 'score:', score)
+	if render:
+		agent.load(EnvName[opt.EnvIdex])
+		res = {}
+		res['score'], res['load'], res['cost'] = evaluate_policy(eval_env, agent, mode='test')
+		print(f"Env: {EnvName[opt.EnvIdex]}, score: {res['score']}, cost: {res['cost']}")
+		with open(f'res/{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+			pickle.dump(res, file)
+		return res['score'], res['load'], res['cost']
+	elif compare:
+		agent.load(EnvName[opt.EnvIdex])
+		score, _, _ = evaluate_policy(eval_env, agent, mode='validation')
+		return score
 	else:
 		total_steps, act, rew, best_score = 0, [], [], -np.inf
 		while total_steps < opt.Max_train_steps:
-			s = env.reset() 
+			s = env.reset(week_num=np.random.randint(1,7))
 			done = False
 
 			'''Interact & trian'''
-			while not done:  
+			while not done:
 				if total_steps < opt.random_steps: a = env.action_space.sample()
 				else: a = agent.select_action(s, deterministic=False)
 				s_next, r, done, _ = env.step(act_clipper(a))
@@ -249,20 +258,18 @@ def main():
 
 				'''record & log'''
 				if total_steps % opt.eval_interval == 0:
-					ep_r, acts = evaluate_policy(eval_env, agent, turns=3)
+					ep_r, _, _ = evaluate_policy(eval_env, agent, mode='validation')
 					print(f'EnvName:{BrifEnvName[opt.EnvIdex]}, Steps: {int(total_steps/1000)}k, Episode Reward:{ep_r}')
 					rew.append(np.array(ep_r))
-					if (total_steps) % (10*opt.eval_interval) == 0:
-						act.append(acts)
 					if ep_r > best_score:
 						agent.save(EnvName[opt.EnvIdex])
 						best_score = ep_r
 		env.close()
 		eval_env.close()
-	with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(act, file)
-	with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(rew, file)
+	# with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(act, file)
+	# with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(rew, file)
 
 
 

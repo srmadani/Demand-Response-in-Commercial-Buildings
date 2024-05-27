@@ -9,6 +9,7 @@ import os#, shutil
 # from datetime import datetime
 from hvac import HVAC
 import pickle
+import plotly.graph_objects as go
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -47,20 +48,27 @@ class RandomBuffer(object):
 				torch.FloatTensor(self.done[ind]).to(self.device)
 			)
 
-def evaluate_policy(env, model, render, turns = 3):
-	scores = 0
-	for _ in range(turns):
-		s, done, act = env.reset(), False, []
+def evaluate_policy(env, model, mode='validation'):
+	if mode == 'validation':
+		week_num = 7
+		s = env.reset(week_num=week_num)
+		done, score = False, 0
 		while not done:
-			# Take deterministic actions at test time
 			a = model.select_action(s, deterministic=True)
 			s_next, r, done, _ = env.step(a)
-			scores += r
+			score += r
 			s = s_next
-			act.append(a)
-			if render:
-				env.render()
-	return scores/turns, env.T_in[1:], act
+		return score, env.T_in[1:]
+	else:
+		week_num = 8
+		s = env.reset(week_num=week_num)
+		done, score = False, 0
+		while not done:
+			a = model.select_action(s, deterministic=True)
+			s_next, r, done, _ = env.step(a)
+			score += r
+			s = s_next
+		return score, env.T_in[1:], env.load, env.cost, env.cost_components
 
 
 #You can just ignore this funciton. Is not related to the RL.
@@ -221,29 +229,28 @@ parser.add_argument('--ModelIdex', type=int, default=50, help='which model to lo
 
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--Max_train_steps', type=int, default=4e5, help='Max training steps')
-parser.add_argument('--save_interval', type=int, default=1e4, help='Model saving interval, in steps.')
+parser.add_argument('--save_interval', type=int, default=1e5, help='Model saving interval, in steps.')
 parser.add_argument('--eval_interval', type=int, default=2e3, help='Model evaluating interval, in steps.')
 parser.add_argument('--random_steps', type=int, default=1e4, help='steps for random policy to explore')
 parser.add_argument('--update_every', type=int, default=50, help='training frequency')
 
 parser.add_argument('--gamma', type=float, default=0.97, help='Discounted Factor')
-parser.add_argument('--hid_shape', type=list, default=[200,200], help='Hidden net shape')
+parser.add_argument('--hid_shape', type=list, default=[200, 200], help='Hidden net shape')
 parser.add_argument('--lr', type=float, default=3e-3, help='Learning rate')
 parser.add_argument('--batch_size', type=int, default=256, help='batch size')
 parser.add_argument('--alpha', type=float, default=0.2, help='init alpha')
 parser.add_argument('--adaptive_alpha', type=str2bool, default=True, help='Use adaptive alpha turning')
 opt = parser.parse_args()
-print(opt)
+# print(opt)
 
-def main():
-	#create Env
-	EnvName = ['HVAC_SACD']
-	BriefEnvName = ['HVAC_SACD']
-	env = HVAC()
-	eval_env = HVAC()
+def main(C=100, R=2, h=80, alpha=1, render=False, compare=False):
+	EnvName = [f'HVAC_SACD_C_{C}_R_{R}_h_{h}_alpha_{alpha}']
+	BriefEnvName = [f'HVAC_SACD_{C}_{R}_{h}_{alpha}']
+	env = HVAC(C=C, R=R, h=h, alpha=alpha)
+	eval_env = HVAC(C=C, R=R, h=h, alpha=alpha)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.n
-	opt.max_e_steps = 7*24*12
+	opt.max_e_steps = env.T
 
 	#Seed everything
 	torch.manual_seed(opt.seed)
@@ -253,8 +260,8 @@ def main():
 	# eval_env.action_space.seed(opt.seed)
 	np.random.seed(opt.seed)
 
-	print('Algorithm: SACD','  Env:',BriefEnvName[opt.EnvIdex],'  state_dim:',opt.state_dim,
-		  '  action_dim:',opt.action_dim,'  Random Seed:',opt.seed, '  max_e_steps:',opt.max_e_steps, '\n')
+	# print('Algorithm: SACD','  Env:',BriefEnvName[opt.EnvIdex],'  state_dim:',opt.state_dim,
+	# 	  '  action_dim:',opt.action_dim,'  Random Seed:',opt.seed, '  max_e_steps:',opt.max_e_steps, '\n')
 
 	#Build model and replay buffer
 	if not os.path.exists('model'): os.mkdir('model')
@@ -262,15 +269,22 @@ def main():
 	if opt.Loadmodel: model.load(BriefEnvName[opt.EnvIdex])
 	buffer = RandomBuffer(opt.state_dim, max_size=int(1e6))
 
-	if opt.render:
-		score, _, hvac_hist = evaluate_policy(eval_env, model, True, 3)
-		with open(f'res/HIST_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-			pickle.dump(hvac_hist, file)
-		print('EnvName:', BriefEnvName[opt.EnvIdex], 'seed:', opt.seed, 'score:', score)
+	if render:
+		model.load(BriefEnvName[opt.EnvIdex])
+		res = {}		
+		res['score'], res['T_in'], res['load'], res['cost'], res['cost_components'] = evaluate_policy(eval_env, model, mode='test')
+		print(f"Env: {BriefEnvName[opt.EnvIdex]}, score: {res['score']}, cost: {res['cost']}")
+		with open(f'res/{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+			pickle.dump(res, file)
+		return res['score'], res['T_in'], res['load'], res['cost'], res['cost_components']
+	elif compare:
+		model.load(BriefEnvName[opt.EnvIdex])
+		score, _ = evaluate_policy(eval_env, model, mode='validation')
+		return score
 	else:
 		total_steps, tin, rew = 0, [], []
 		while total_steps < opt.Max_train_steps:
-			s, done, ep_r, steps, best_score = env.reset(), False, 0, 0, -np.inf
+			s, done, ep_r, steps, best_score = env.reset(week_num=np.random.randint(1,7)), False, 0, 0, -np.inf
 			while not done:
 				steps += 1  # steps in current episode
 
@@ -293,20 +307,20 @@ def main():
 
 				'''record & log'''
 				if (total_steps) % opt.eval_interval == 0:
-					score, Tin = evaluate_policy(eval_env, model, render=False)
+					score, Tin = evaluate_policy(eval_env, model, mode='validation')
 					rew.append(score)
 					if (total_steps) % (10*opt.eval_interval) == 0:
 						tin.append(Tin)
 					if score > best_score:
 						model.save(BriefEnvName[opt.EnvIdex])
 						best_score = score
-					print('EnvName:', BriefEnvName[opt.EnvIdex], 'seed:', opt.seed,
+					print('EnvName:', EnvName[opt.EnvIdex], 'seed:', opt.seed,
 						  'steps: {}k'.format(int(total_steps / 1000)), 'score:', int(score))
 				total_steps += 1
-		with open(f'res/tin_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-			pickle.dump(tin, file)
-		with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-			pickle.dump(rew, file)
+		# with open(f'res/tin_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+		# 	pickle.dump(tin, file)
+		# with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+		# 	pickle.dump(rew, file)
 
 	env.close()
 	eval_env.close()

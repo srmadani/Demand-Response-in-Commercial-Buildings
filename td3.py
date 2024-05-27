@@ -10,6 +10,7 @@ from datetime import datetime
 from ctrl import CTRL
 import argparse
 import pickle
+import plotly.graph_objects as go
 
 def act_clipper(a):
 	if a>1:
@@ -72,21 +73,18 @@ class Double_Q_Critic(nn.Module):
 		q1 = self.l3(q1)
 		return q1
 
-def evaluate_policy(env, agent, turns = 3):
-	total_scores = 0
-	for _ in range(turns):
-		s = env.reset()
-		done = False
-		acts = []
-		while not done:
-			# Take deterministic actions at test time
-			a = agent.select_action(s, deterministic=True)
-			s_next, r, done, _ = env.step(act_clipper(a))
-
-			total_scores += r
-			s = s_next
-			acts.append(a)
-	return total_scores/turns, acts
+def evaluate_policy(env, model, mode='validation'):
+	if mode == 'validation':
+		week_num = 7
+	else:
+		week_num = 8
+	s, done, scores= env.reset(week_num = week_num), False, 0
+	while not done:
+		a = model.select_action(s, deterministic = True)
+		s_next, r, done, _ = env.step(act_clipper(a))
+		scores += r
+		s = s_next
+	return scores, env.load, env.cost, env.cost_components
 
 
 #Just ignore this function~
@@ -245,22 +243,21 @@ parser.add_argument('--explore_noise', type=float, default=0.35, help='exploring
 parser.add_argument('--explore_noise_decay', type=float, default=0.998, help='Decay rate of explore noise')
 opt = parser.parse_args()
 opt.dvc = torch.device(opt.dvc) # from str to torch.device
-print(opt)
+# print(opt)
 
-
-def main():
-	EnvName = ['CTRL_TD3']
-	BrifEnvName = ['CTRL_TD3']
+def main(beta=0.1, render=False, compare=False):
+	EnvName = [f'CTRL_TD3_beta_{beta}']
+	BrifEnvName = [f'CTRL_TD3_{beta}']
 
 	# Build Env
-	env = CTRL()
-	eval_env = CTRL()
+	env = CTRL(beta=beta)
+	eval_env = CTRL(beta=beta)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.shape[0]
 	opt.max_action = 1
 	opt.max_e_steps = 7*7*12
-	print(f'Env:{EnvName[opt.EnvIdex]}  state_dim:{opt.state_dim}  action_dim:{opt.action_dim}  '
-		  f'max_a:{opt.max_action}  min_a:{env.action_space.low[0]}  max_e_steps:{opt.max_e_steps}')
+	# print(f'Env:{EnvName[opt.EnvIdex]}  state_dim:{opt.state_dim}  action_dim:{opt.action_dim}  '
+	# 	  f'max_a:{opt.max_action}  min_a:{env.action_space.low[0]}  max_e_steps:{opt.max_e_steps}')
 
 	# Seed Everything
 	env_seed = opt.seed
@@ -269,25 +266,33 @@ def main():
 	torch.cuda.manual_seed(opt.seed)
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
-	print("Random Seed: {}".format(opt.seed))
+	# print("Random Seed: {}".format(opt.seed))
 
 	# Build DRL model
 	if not os.path.exists('model'): os.mkdir('model')
 	agent = TD3_agent(**vars(opt)) # var: transfer argparse to dictionary
-	if opt.Loadmodel: agent.load(BrifEnvName[opt.EnvIdex], opt.ModelIdex)
+	if opt.Loadmodel: agent.load(BrifEnvName[opt.EnvIdex])
 
-	if opt.render:
-		while True:
-			score, _ = evaluate_policy(env, agent, turns=3)
-			print('EnvName:', BrifEnvName[opt.EnvIdex], 'score:', score)
+	if render:
+		agent.load(BrifEnvName[opt.EnvIdex])
+		res = {}
+		res['score'], res['load'], res['cost'], res['cost_components'] = evaluate_policy(eval_env, agent, mode='test')
+		print(f"Env: {BrifEnvName[opt.EnvIdex]}, score: {res['score']}, cost: {res['cost']}")
+		with open(f'res/{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+			pickle.dump(res, file)
+		return res['score'], res['load'], res['cost'], res['cost_components']
+	elif compare:
+		agent.load(BrifEnvName[opt.EnvIdex])
+		score, _, _, _ = evaluate_policy(eval_env, agent, mode='validation')
+		return score
 	else:
 		total_steps, act, rew, best_score = 0, [], [], -np.inf
 		while total_steps < opt.Max_train_steps:
-			s = env.reset()
+			s = env.reset(week_num=np.random.randint(1,7))
 			done = False
 
 			'''Interact & trian'''
-			while not done:  
+			while not done:
 				if total_steps < (10*opt.max_e_steps): a = env.action_space.sample() # warm up
 				else: a = agent.select_action(s, deterministic=False)
 				s_next, r, done, _ = env.step(act_clipper(a))
@@ -305,21 +310,19 @@ def main():
 				'''record & log'''
 				if total_steps % opt.eval_interval == 0:
 					agent.explore_noise *= opt.explore_noise_decay
-					ep_r, acts = evaluate_policy(eval_env, agent, turns=3)
+					ep_r, _, _ = evaluate_policy(eval_env, agent, mode='validation')
 					print(f'EnvName:{BrifEnvName[opt.EnvIdex]}, Steps: {int(total_steps/1000)}k, Episode Reward:{ep_r}')
 					rew.append(np.array(ep_r))
-					if (total_steps) % (10*opt.eval_interval) == 0:
-						act.append(acts)
 					if ep_r > best_score:
-						agent.save(EnvName[opt.EnvIdex])
+						agent.save(BrifEnvName[opt.EnvIdex])
 						best_score = ep_r
 
 		env.close()
 		eval_env.close()
-	with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(act, file)
-	with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(rew, file)
+	# with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(act, file)
+	# with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(rew, file)
 
 
 if __name__ == '__main__':

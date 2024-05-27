@@ -5,49 +5,60 @@ import numpy as np
 import pandas as pd
 
 class CTRL(gym.Env):
-    def __init__(self, num_days=7, alpha=0.05, beta=0.5, P = 0.1):
+    def __init__(self, beta=0.2, gamma=0.55132):
         super(CTRL, self).__init__()
-        self.num_days = num_days
-        with open(r'datasets/df.pkl', 'rb') as f:
-            db = pickle.load(f)
-            
-        db = db[((db['Date/Time (LST)'].dt.hour >= 16) & (db['Date/Time (LST)'].dt.hour < 20)) | ((db['Date/Time (LST)'].dt.hour >= 6) & (db['Date/Time (LST)'].dt.hour < 9))]
 
-        self.df = db
-        self.load_max = self.df['Reducible Load (kW)'].max()
-        self.alpha = alpha
-        self.beta = beta
-        # self.high_consumption_hours = [6, 7, 8, 16, 17, 18, 19]
-        self.P = P
-        self._max_episode_steps = self.num_days * 7 * 12
-        self.load = np.zeros(self.num_days * 7 * 12)  
+        self.beta  = beta
+        self.gamma = gamma
 
-        self.action_space = spaces.Box(0.0, 1.0, (1,), dtype=np.float32)
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32) # sin(hour), cos(hour), is_working_day, normalized current reducible load
+        self.action_space = spaces.Box(0.0, 1.0, (1,), dtype=np.float32) # reduction ratio
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(6,), dtype=np.float32) # RTLMP, sin(hour), cos(hour), peak, is_working_day, normalized current reducible load
 
     def step(self, action):
+        # action = 0
+        self.acts[self.t] = action
+        tmp = self.db.iloc[self.t,:]
+        reward = tmp['reducible [kWh]'] * action * tmp['peak'] * self.gamma\
+                - self.P[self.t] * tmp['reducible [kWh]'] * (1-action) \
+                - self.beta * (tmp['reducible [kWh]'] * action) ** 2
+        
+        self.cost_components[self.t, :] = np.array([tmp['reducible [kWh]'] * action * tmp['peak'] * self.gamma, # 0: peak load reduction reward
+                self.P[self.t] * tmp['reducible [kWh]'] * (1-action), # 1: electricity cost
+                self.beta * (tmp['reducible [kWh]'] * action) ** 2]).reshape(-1) # 2: dissatisfaction
 
-        tmp = self.df.iloc[self.t,:]
-        reward = tmp['Reducible Load (kW)'] * action * self.beta\
-                - self.P * tmp['Reducible Load (kW)'] * (1-action) \
-                - self.alpha * (tmp['Reducible Load (kW)'] * action) ** 2
-
-        self.load[self.t] = tmp['Reducible Load (kW)'] * action
+        self.load[self.t] = tmp['reducible [kWh]'] * (1-action)
+        self.cost += self.P[self.t] * tmp['reducible [kWh]'] * (1-action) - tmp['reducible [kWh]'] * action * tmp['peak'] * self.gamma
         self.t += 1
-        if self.t < self.num_days * 7 * 12 :
-            tmp = self.df.iloc[self.t,:]
-            next_state = np.array([tmp['sin'], tmp['cos'],  tmp['working_day'], tmp['Reducible Load (kW)']/self.load_max])
+        if self.t < self.T :
+            tmp = self.db.iloc[self.t,:]
+            self.peak = tmp['peak']
+            next_state = np.array([self.P[self.t]/2.7, tmp['sin'], tmp['cos'], tmp['peak'], tmp['working_day'], tmp['reducible [kWh]']/self.light_max])
             done = False
         else:
-            next_state = np.array([0, 0, 0, 0])
+            next_state = np.array([0, 0, 0, 0, 0, 0])
             done = True
         
         return next_state, reward, done, {}
 
-    def reset(self):
+    def reset(self, week_num=1):
+        self.T = 7 * 12 * 24
+        
+        with open(r'datasets/df.pkl', 'rb') as f:
+            db = pickle.load(f)
+        self.db = db.iloc[(week_num-1)*self.T:week_num*self.T,:].copy()
+        self.light_max = np.max(self.db['reducible [kWh]'])
+        self.P = np.array(self.db['P [$/kWh]'])
+        self._max_episode_steps = self.T
+        self.load = np.zeros(self.T)  
+        self.acts = np.zeros(self.T)  
+        self.cost_components = np.zeros((self.T,3))
         self.t = 0
-        tmp = self.df.iloc[self.t,:]
-        return np.array([tmp['sin'], tmp['cos'],  tmp['working_day'], tmp['Reducible Load (kW)']/self.load_max])
+        self.cost = 0
+        tmp = self.db.iloc[self.t,:]
+        self.peak = tmp['peak']
+
+        # db['P [$/kWh]'].max() - db['P [$/kWh]'].min() : 2.7
+        return np.array([self.P[self.t]/2.7, tmp['sin'], tmp['cos'], tmp['peak'], tmp['working_day'], tmp['reducible [kWh]']/self.light_max])
     
     def render(self):
         pass

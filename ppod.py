@@ -11,6 +11,7 @@ import os#, shutil
 from hvac import HVAC
 import argparse
 import pickle
+import plotly.graph_objects as go
 
 class Actor(nn.Module):
 	def __init__(self, state_dim, action_dim, net_width):
@@ -44,20 +45,27 @@ class Critic(nn.Module):
 		v = self.C3(v)
 		return v
 
-def evaluate_policy(env, agent, turns = 3):
-	total_scores = 0
-	for _ in range(turns):
-		s = env.reset()
-		done = False
-
+def evaluate_policy(env, model, mode='validation'):
+	if mode == 'validation':
+		week_num = 7
+		s = env.reset(week_num=week_num)
+		done, score = False, 0
 		while not done:
-			# Take deterministic actions at test time
-			a, logprob_a = agent.select_action(s, deterministic=True)
-			s_next, r, done, _ = env.step(a)
-
-			total_scores += r
+			a = model.select_action(s, deterministic=True)
+			s_next, r, done, _ = env.step(a[0])
+			score += r
 			s = s_next
-	return total_scores/turns, env.T_in[1:]
+		return score, env.T_in[1:]
+	else:
+		week_num = 8
+		s = env.reset(week_num=week_num)
+		done, score = False, 0
+		while not done:
+			a = model.select_action(s, deterministic=True)
+			s_next, r, done, _ = env.step(a[0])
+			score += r
+			s = s_next
+		return score, env.T_in[1:], env.load, env.cost, env.cost_components
 
 
 #You can just ignore this funciton. Is not related to the RL.
@@ -199,7 +207,6 @@ parser.add_argument('--dvc', type=str, default='cuda', help='running device: cud
 parser.add_argument('--EnvIdex', type=int, default=0, help='HVAC_PPOD')
 parser.add_argument('--render', type=str2bool, default=False, help='Render or Not')
 parser.add_argument('--Loadmodel', type=str2bool, default=False, help='Load pretrained model or Not')
-parser.add_argument('--ModelIdex', type=int, default=300000, help='which model to load')
 
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--T_horizon', type=int, default=7*24*12, help='lenth of long trajectory')
@@ -207,30 +214,29 @@ parser.add_argument('--Max_train_steps', type=int, default=4e5, help='Max traini
 parser.add_argument('--save_interval', type=int, default=1e5, help='Model saving interval, in steps.')
 parser.add_argument('--eval_interval', type=int, default=2e3, help='Model evaluating interval, in steps.')
 
-parser.add_argument('--gamma', type=float, default=0.97, help='Discounted Factor')
-parser.add_argument('--lambd', type=float, default=0.95, help='GAE Factor')
+parser.add_argument('--gamma', type=float, default=0.98, help='Discounted Factor')
+parser.add_argument('--lambd', type=float, default=0.92, help='GAE Factor')
 parser.add_argument('--clip_rate', type=float, default=0.15, help='PPO Clip rate')
 parser.add_argument('--K_epochs', type=int, default=40, help='PPO update times')
 parser.add_argument('--net_width', type=int, default=64, help='Hidden net width')
-parser.add_argument('--lr', type=float, default=5e-3, help='Learning rate')
+parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
 parser.add_argument('--l2_reg', type=float, default=1e-3, help='L2 regulization coefficient for Critic')
-parser.add_argument('--batch_size', type=int, default=1024, help='lenth of sliced trajectory')
+parser.add_argument('--batch_size', type=int, default=2048, help='lenth of sliced trajectory')
 parser.add_argument('--entropy_coef', type=float, default=1e-3, help='Entropy coefficient of Actor')
 parser.add_argument('--entropy_coef_decay', type=float, default=0.97, help='Decay rate of entropy_coef')
 parser.add_argument('--adv_normalization', type=str2bool, default=True, help='Advantage normalization')
 opt = parser.parse_args()
 opt.dvc = torch.device(opt.dvc) # from str to torch.device
-print(opt)
+# print(opt)
 
-def main():
-	# Build Training Env and Evaluation Env
-	EnvName = ['HVAC_PPOD']
-	BriefEnvName = ['HVAC_PPOD']
-	env = HVAC()
-	eval_env = HVAC()
+def main(C=100, R=1, h=50, alpha=1, render=False, compare=False):
+	EnvName = [f'HVAC_PPOD_C_{C}_R_{R}_h_{h}_alpha_{alpha}']
+	BriefEnvName = [f'HVAC_PPOD_{C}_{R}_{h}_{alpha}']
+	env = HVAC(C=C, R=R, h=h, alpha=alpha)
+	eval_env = HVAC(C=C, R=R, h=h, alpha=alpha)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.n
-	opt.max_e_steps = 7*24*12
+	opt.max_e_steps = env.T
 
 	# Seed Everything
 	env_seed = opt.seed
@@ -239,24 +245,32 @@ def main():
 	torch.cuda.manual_seed(opt.seed)
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
-	print("Random Seed: {}".format(opt.seed))
+	# print("Random Seed: {}".format(opt.seed))
 
-	print('Env:',BriefEnvName[opt.EnvIdex],'  state_dim:',opt.state_dim,'  action_dim:',opt.action_dim,'   Random Seed:',opt.seed, '  max_e_steps:',opt.max_e_steps)
-	print('\n')
+	# print('Env:',BriefEnvName[opt.EnvIdex],'  state_dim:',opt.state_dim,'  action_dim:',opt.action_dim,'   Random Seed:',opt.seed, '  max_e_steps:',opt.max_e_steps)
+	# print('\n')
 
 	if not os.path.exists('model'): os.mkdir('model')
 	agent = PPO_discrete(**vars(opt))
-	if opt.Loadmodel: agent.load(opt.ModelIdex)
+	if opt.Loadmodel: agent.load(BriefEnvName[opt.EnvIdex])
 
-	if opt.render:
-		while True:
-			ep_r, _ = evaluate_policy(env, agent, turns=1)
-			print(f'Env:{EnvName[opt.EnvIdex]}, Episode Reward:{ep_r}')
+	if render:
+		agent.load(BriefEnvName[opt.EnvIdex])
+		res = {}		
+		res['score'], res['T_in'], res['load'], res['cost'], res['cost_components'] = evaluate_policy(eval_env, agent, mode='test')
+		print(f"Env: {EnvName[opt.EnvIdex]}, score: {res['score']}, cost: {res['cost']}")
+		with open(f'res/{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+			pickle.dump(res, file)
+		return res['score'], res['T_in'], res['load'], res['cost'], res['cost_components']
+	elif compare:
+		agent.load(BriefEnvName[opt.EnvIdex])
+		score, _ = evaluate_policy(eval_env, agent, mode='validation')
+		return score
 	else:
 		traj_lenth, total_steps, best_score = 0, 0, -np.inf
 		tin, rew = [], []
 		while total_steps < opt.Max_train_steps:
-			s = env.reset()
+			s = env.reset(week_num=np.random.randint(1,7))
 			done = False
 
 			'''Interact & trian'''
@@ -279,7 +293,7 @@ def main():
 
 				'''Record & log'''
 				if total_steps % opt.eval_interval == 0:
-					score, Tin = evaluate_policy(eval_env, agent, turns=3) # evaluate the policy for 3 times, and get averaged result
+					score, Tin = evaluate_policy(eval_env, agent, mode='validation')
 					rew.append(score)
 					if (total_steps) % (10*opt.eval_interval) == 0:
 						tin.append(Tin)
@@ -290,10 +304,10 @@ def main():
 
 		env.close()
 		eval_env.close()
-	with open(f'res/tin_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(tin, file)
-	with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-		pickle.dump(rew, file)
+	# with open(f'res/tin_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(tin, file)
+	# with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+	# 	pickle.dump(rew, file)
 
 if __name__ == '__main__':
 	main()
