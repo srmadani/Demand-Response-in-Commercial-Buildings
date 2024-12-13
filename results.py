@@ -7,7 +7,7 @@ from td3  import main as main_td3
 import pickle
 import numpy as np
 
-def results_agg(hvac_alg = 'd3qn', ctrl_alg = 'ddpg'):
+def results_agg(hvac_alg = 'ppod', ctrl_alg = 'td3', cpp=0.000067, temperature=0):
     hvac_alg = hvac_alg.lower()
     ctrl_alg = ctrl_alg.lower()
     C_values = [100, 150]
@@ -17,6 +17,8 @@ def results_agg(hvac_alg = 'd3qn', ctrl_alg = 'ddpg'):
     # beta_values  = [0.1, 0.2, 0.3, 0.4]
     alpha_values = [0.2, 0.3]
     beta_values  = [0.2, 0.3]
+    # gamma_values = [0.35132, 0.45132, 0.65132, 0.75132]
+    gamma = 0.75132
     main_res            = {}
     agg_load_total          = np.zeros(7*24*12)
     agg_load_hvac           = np.zeros(7*24*12)
@@ -27,7 +29,7 @@ def results_agg(hvac_alg = 'd3qn', ctrl_alg = 'ddpg'):
     agg_ref_ctrl_load       = np.zeros(7*24*12)
     agg_ref_Tin             = np.zeros(7*24*12)
     agg_total_nonreducible  = np.zeros(7*24*12)
-    agg_cost_components     = np.zeros((7*24*12, 3))
+    agg_cost_components     = np.zeros((7*24*12, 4))
     agg_total_cost          = 0
     
     # Initialize the main_res dictionary with default values
@@ -53,11 +55,11 @@ def results_agg(hvac_alg = 'd3qn', ctrl_alg = 'ddpg'):
     db = db.iloc[(8-1) * 7 * 12 * 24 : 8 * 7 * 12 * 24,:].copy()
     for beta in beta_values:
         if ctrl_alg == 'ddpg':
-            score_, load_ctrl, cost_, cost_components_ = main_ddpg(beta=beta, render=True, compare=False)
+            score_, load_ctrl, cost_, cost_components_ = main_ddpg(beta=beta, render=True, compare=False, gamma=gamma)
         elif ctrl_alg == 'td3':
-            score_, load_ctrl, cost_, cost_components_ = main_td3(beta=beta, render=True, compare=False)
+            score_, load_ctrl, cost_, cost_components_ = main_td3(beta=beta, render=True, compare=False, gamma=gamma)
         else:
-            score_, load_ctrl, cost_, cost_components_ = main_ppo(beta=beta, render=True, compare=False)
+            score_, load_ctrl, cost_, cost_components_ = main_ppo(beta=beta, render=True, compare=False, gamma=gamma)
         for C in C_values:
             for R in R_values:
                 for h in h_values:
@@ -68,11 +70,11 @@ def results_agg(hvac_alg = 'd3qn', ctrl_alg = 'ddpg'):
                         ref_T_in.extend(ref_res[(day, C, R, h)][1])
                     for alpha in alpha_values:
                         if hvac_alg == 'd3qn':
-                            score, T_in, load_hvac, cost, cost_components = main_d3qn(C=C, R=R, h=h, alpha=alpha, render=True)
+                            score, T_in, load_hvac, cost, cost_components = main_d3qn(C=C, R=R, h=h, alpha=alpha, render=True, gamma=gamma, temperature=temperature)
                         elif hvac_alg == 'ppod':
-                            score, T_in, load_hvac, cost, cost_components = main_ppod(C=C, R=R, h=h, alpha=alpha, render=True)
+                            score, T_in, load_hvac, cost, cost_components = main_ppod(C=C, R=R, h=h, alpha=alpha, render=True, gamma=gamma, temperature=temperature)
                         else:
-                            score, T_in, load_hvac, cost, cost_components = main_sacd(C=C, R=R, h=h, alpha=alpha, render=True)
+                            score, T_in, load_hvac, cost, cost_components = main_sacd(C=C, R=R, h=h, alpha=alpha, render=True, gamma=gamma, temperature=temperature)
                         params = (C, R, h, alpha, beta)
                         main_res[params]['cost'] = float(cost) + float(cost_) + np.sum(db['non_reducible [kWh]'].to_numpy() * db['P [$/kWh]'])
                         main_res[params]['score'] = score + score_
@@ -121,8 +123,8 @@ def alg_comparison():
     C_values = [100, 150]
     R_values = [1, 2]
     h_values = [50, 80]
-    alpha_values = [0.1, 0.2, 0.3, 0.4]
-    beta_values = [0.1, 0.2, 0.3, 0.4]
+    alpha_values = [0.2, 0.3]
+    beta_values = [0.2, 0.3]
     scores_hvac = np.zeros(3)
     scores_ctrl = np.zeros(3)
     for C in C_values:
@@ -143,6 +145,11 @@ def alg_comparison():
     print(f'best ctrl algorithm is {scores_ctrl.argmax()}')
 
 
+# total scores for hvac algorithms are: [-18360.95830439  -5884.05223127  -7219.71741781]
+# best hvac algorithm is 1
+# total scores for ctrl algorithms are: [-64.64607239 -64.41662598 -64.73800659]
+# best ctrl algorithm is 1
+
 if __name__ == '__main__':
-    # results_agg(hvac_alg = 'sacd', ctrl_alg = 'td3')
-    alg_comparison()
+    results_agg(hvac_alg = 'ppod', ctrl_alg = 'td3')
+    # alg_comparison()

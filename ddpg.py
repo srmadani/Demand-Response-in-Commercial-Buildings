@@ -10,6 +10,11 @@ from ctrl import CTRL
 import argparse
 import pickle
 import plotly.graph_objects as go
+import time
+#import mlflow
+
+#mlflow.set_tracking_uri("sqlite:///mlflow.db") #The name of the database to use
+#mlflow.set_experiment("ctrl-ddpg") #If already exists mlflow will append to existing data. Else it will make a new experiment.
 
 def act_clipper(a):
 	if a>1:
@@ -182,8 +187,9 @@ parser.add_argument('--ModelIdex', type=int, default=100, help='which model to l
 
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--Max_train_steps', type=int, default=4e5, help='Max training steps')
+parser.add_argument('--Max_train_time', type=int, default=1e5, help='Max training time')
 parser.add_argument('--save_interval', type=int, default=4e4, help='Model saving interval, in steps.')
-parser.add_argument('--eval_interval', type=int, default=2e3, help='Model evaluating interval, in steps.')
+parser.add_argument('--eval_interval', type=int, default=2e2, help='Model evaluating interval, in steps.')
 
 parser.add_argument('--gamma', type=float, default=0.97, help='Discounted Factor')
 parser.add_argument('--net_width', type=int, default=400, help='Hidden net width, s_dim-400-300-a_dim')
@@ -197,13 +203,18 @@ opt.dvc = torch.device(opt.dvc) # from str to torch.device
 # print(opt)
 
 
-def main(beta=0.1, render = False, compare=False):
-	EnvName = [f'CTRL_DDPG_beta_{beta}']
-	BrifEnvName = [f'CTRL_DDPG_{beta}']
+def main(beta=0.1, gamma=0.55132, render = False, compare=False, cpp=0.000067):
+	# mlflow.set_tag("alg", 'ddpg')
+	# mlflow.set_tag("beta", beta)
+	# mlflow.set_tag("gamma", gamma)
+	# mlflow.set_tag("cpp", cpp)
+	start_time = time.time()
+	EnvName = [f'CTRL_DDPG_beta_{beta}_gamma_{gamma}']
+	BrifEnvName = [f'CTRL_DDPG_{beta}_{gamma}']
 
 	# Build Env
-	env = CTRL(beta=beta)
-	eval_env = CTRL(beta=beta)
+	env = CTRL(beta=beta, gamma=gamma)
+	eval_env = CTRL(beta=beta, gamma=gamma)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.shape[0]
 	opt.max_action = 1
@@ -223,6 +234,7 @@ def main(beta=0.1, render = False, compare=False):
 	if not os.path.exists('model'): os.mkdir('model')
 	agent = DDPG_agent(**vars(opt)) # var: transfer argparse to dictionary
 	if opt.Loadmodel: agent.load(BrifEnvName[opt.EnvIdex])
+	# mlflow.log_params(opt.__dict__)
 
 	if render:
 		agent.load(EnvName[opt.EnvIdex])
@@ -237,8 +249,11 @@ def main(beta=0.1, render = False, compare=False):
 		score, _, _ = evaluate_policy(eval_env, agent, mode='validation')
 		return score
 	else:
-		total_steps, act, rew, best_score = 0, [], [], -np.inf
-		while total_steps < opt.Max_train_steps:
+		elapsed_times = []
+		rewards = []
+		total_steps, elapsed_time, act, rew, best_score = 0, 0, [], [], -np.inf
+		# while total_steps < opt.Max_train_steps:
+		while elapsed_time < opt.Max_train_time:
 			s = env.reset(week_num=np.random.randint(1,7))
 			done = False
 
@@ -259,11 +274,24 @@ def main(beta=0.1, render = False, compare=False):
 				'''record & log'''
 				if total_steps % opt.eval_interval == 0:
 					ep_r, _, _ = evaluate_policy(eval_env, agent, mode='validation')
-					print(f'EnvName:{BrifEnvName[opt.EnvIdex]}, Steps: {int(total_steps/1000)}k, Episode Reward:{ep_r}')
-					rew.append(np.array(ep_r))
+					elapsed_time = time.time() - start_time
+					# print(ep_r)
+					# print(type(ep_r))
+					print(f'EnvName:{BrifEnvName[opt.EnvIdex]}, Steps: {int(total_steps/1000)}k, Episode Reward:{ep_r}, Elapsed Time:{elapsed_time}')
+					# rew.append(np.array(ep_r))
 					if ep_r > best_score:
 						agent.save(EnvName[opt.EnvIdex])
 						best_score = ep_r
+
+					
+					elapsed_times.append(elapsed_time)
+					rewards.append(best_score)
+					elapsed_time = time.time() - start_time
+					# mlflow.log_metric("score",ep_r[0])
+					# mlflow.log_metric("time",elapsed_time)
+		
+		with open(f'res/track/track_{EnvName[opt.EnvIdex]}.pkl', 'wb') as f:
+			pickle.dump((elapsed_times, rewards), f)
 		env.close()
 		eval_env.close()
 	# with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:

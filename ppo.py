@@ -11,6 +11,11 @@ from ctrl import CTRL
 import argparse
 import pickle
 import plotly.graph_objects as go
+import time
+# import mlflow
+
+# mlflow.set_tracking_uri("sqlite:///mlflow.db") #The name of the database to use
+# mlflow.set_experiment("ctrl-ppo") #If already exists mlflow will append to existing data. Else it will make a new experiment.
 
 def act_clipper(a):
 	if a>1:
@@ -289,8 +294,9 @@ parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--T_horizon', type=int, default=7*7*12, help='lenth of long trajectory')
 parser.add_argument('--Distribution', type=str, default='Beta', help='Should be one of Beta ; GS_ms  ;  GS_m')
 parser.add_argument('--Max_train_steps', type=int, default=int(4e5), help='Max training steps')
+parser.add_argument('--Max_train_time', type=int, default=1e5, help='Max training time')
 parser.add_argument('--save_interval', type=int, default=int(4e4), help='Model saving interval, in steps.')
-parser.add_argument('--eval_interval', type=int, default=int(2e3), help='Model evaluating interval, in steps.')
+parser.add_argument('--eval_interval', type=int, default=int(2e2), help='Model evaluating interval, in steps.')
 
 parser.add_argument('--gamma', type=float, default=0.97, help='Discounted Factor')
 parser.add_argument('--lambd', type=float, default=0.95, help='GAE Factor')
@@ -309,13 +315,18 @@ opt.dvc = torch.device(opt.dvc) # from str to torch.device
 # print(opt)
 
 
-def main(beta=0.1, render=False, compare=False):
-	EnvName = [f'CTRL_PPO_beta_{beta}']
-	BrifEnvName = [f'CTRL_PPO_{beta}']
+def main(beta=0.1, gamma=0.55132, render=False, compare=False, cpp=0.000067):
+	#mlflow.set_tag("alg", 'ppo')
+	#mlflow.set_tag("beta", beta)
+	#mlflow.set_tag("gamma", gamma)
+	#mlflow.set_tag("cpp", cpp)
+	start_time = time.time()
+	EnvName = [f'CTRL_PPO_beta_{beta}_gamma_{gamma}']
+	BrifEnvName = [f'CTRL_PPO_{beta}_{gamma}']
 
 	# Build Env
-	env = CTRL(beta=beta)
-	eval_env = CTRL(beta=beta)
+	env = CTRL(beta=beta, gamma=gamma)
+	eval_env = CTRL(beta=beta, gamma=gamma)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.shape[0]
 	opt.max_action = 1
@@ -340,6 +351,7 @@ def main(beta=0.1, render=False, compare=False):
 	if not os.path.exists('model'): os.mkdir('model')
 	agent = PPO_agent(**vars(opt)) # transfer opt to dictionary, and use it to init PPO_agent
 	if opt.Loadmodel: agent.load(BrifEnvName[opt.EnvIdex])
+	#mlflow.log_params(opt.__dict__)
 
 	if render:
 		agent.load(BrifEnvName[opt.EnvIdex])
@@ -353,8 +365,11 @@ def main(beta=0.1, render=False, compare=False):
 		score, _, _ = evaluate_policy(eval_env, agent, mode='validation')
 		return score
 	else:
-		total_steps, traj_lenth, act, rew, best_score = 0, 0, [], [], -np.inf
-		while total_steps < opt.Max_train_steps:
+		elapsed_times = []
+		rewards = []
+		total_steps, elapsed_time, traj_lenth, act, rew, best_score = 0, 0, 0, [], [], -np.inf
+		# while total_steps < opt.Max_train_steps:
+		while elapsed_time < opt.Max_train_time:
 			s = env.reset(week_num=np.random.randint(1,7))
 			done = False
 
@@ -383,9 +398,18 @@ def main(beta=0.1, render=False, compare=False):
 					if score > best_score:
 						agent.save(BrifEnvName[opt.EnvIdex])
 						best_score = score
-					print('EnvName:',EnvName[opt.EnvIdex],'seed:',opt.seed,'steps: {}k'.format(int(total_steps/1000)),'score:', score)
+
+					elapsed_time = time.time() - start_time
+					elapsed_times.append(elapsed_time)
+					rewards.append(best_score)
+					elapsed_time = time.time() - start_time
+					print(f'EnvName:{BrifEnvName[opt.EnvIdex]} , Steps: {int(total_steps/1000)}k, Episode Reward:{score}, Elapsed Time:{elapsed_time}')
+					#mlflow.log_metric("score",score[0])
+					#mlflow.log_metric("time",elapsed_time)
 
 
+		with open(f'res/track/track_{EnvName[opt.EnvIdex]}.pkl', 'wb') as f:
+			pickle.dump((elapsed_times, rewards), f)
 		env.close()
 		eval_env.close()
 	# with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:

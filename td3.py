@@ -10,7 +10,11 @@ from datetime import datetime
 from ctrl import CTRL
 import argparse
 import pickle
-import plotly.graph_objects as go
+import time
+#import mlflow
+
+#mlflow.set_tracking_uri("sqlite:///mlflow.db") #The name of the database to use
+#mlflow.set_experiment("ctrl-td3") #If already exists mlflow will append to existing data. Else it will make a new experiment.
 
 def act_clipper(a):
 	if a>1:
@@ -230,8 +234,9 @@ parser.add_argument('--ModelIdex', type=int, default=30, help='which model to lo
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument('--update_every', type=int, default=50, help='training frequency')
 parser.add_argument('--Max_train_steps', type=int, default=int(4e5), help='Max training steps')
+parser.add_argument('--Max_train_time', type=int, default=1e5, help='Max training time')
 parser.add_argument('--save_interval', type=int, default=int(1e5), help='Model saving interval, in steps.')
-parser.add_argument('--eval_interval', type=int, default=int(2e3), help='Model evaluating interval, in steps.')
+parser.add_argument('--eval_interval', type=int, default=int(2e2), help='Model evaluating interval, in steps.')
 
 parser.add_argument('--delay_freq', type=int, default=1, help='Delayed frequency for Actor and Target Net')
 parser.add_argument('--gamma', type=float, default=0.97, help='Discounted Factor')
@@ -245,13 +250,22 @@ opt = parser.parse_args()
 opt.dvc = torch.device(opt.dvc) # from str to torch.device
 # print(opt)
 
-def main(beta=0.1, render=False, compare=False):
-	EnvName = [f'CTRL_TD3_beta_{beta}']
-	BrifEnvName = [f'CTRL_TD3_{beta}']
+# def main(beta=0.1, render=False, compare=False):
+# 	start_time = time.time()
+# 	EnvName = [f'CTRL_TD3_beta_{beta}']
+# 	BrifEnvName = [f'CTRL_TD3_{beta}']
+def main(beta=0.2, gamma=0.55132, render=False, compare=False, cpp=0.000067):	
+	#mlflow.set_tag("alg", 'td3')
+	#mlflow.set_tag("beta", beta)
+	#mlflow.set_tag("gamma", gamma)
+	#mlflow.set_tag("cpp", cpp)
+	start_time = time.time()
+	EnvName = [f'CTRL_TD3_beta_{beta}_gamma_{gamma}']
+	BrifEnvName = [f'CTRL_TD3_{beta}_{gamma}']
 
 	# Build Env
-	env = CTRL(beta=beta)
-	eval_env = CTRL(beta=beta)
+	env = CTRL(beta=beta, gamma=gamma)
+	eval_env = CTRL(beta=beta, gamma=gamma)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.shape[0]
 	opt.max_action = 1
@@ -267,6 +281,7 @@ def main(beta=0.1, render=False, compare=False):
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
 	# print("Random Seed: {}".format(opt.seed))
+	#mlflow.log_params(opt.__dict__)
 
 	# Build DRL model
 	if not os.path.exists('model'): os.mkdir('model')
@@ -286,8 +301,11 @@ def main(beta=0.1, render=False, compare=False):
 		score, _, _, _ = evaluate_policy(eval_env, agent, mode='validation')
 		return score
 	else:
-		total_steps, act, rew, best_score = 0, [], [], -np.inf
-		while total_steps < opt.Max_train_steps:
+		elapsed_times = []
+		rewards = []
+		total_steps, elapsed_time, act, rew, best_score = 0, 0, [], [], -np.inf
+		# while total_steps < opt.Max_train_steps:
+		while elapsed_time < opt.Max_train_time:
 			s = env.reset(week_num=np.random.randint(1,7))
 			done = False
 
@@ -310,20 +328,28 @@ def main(beta=0.1, render=False, compare=False):
 				'''record & log'''
 				if total_steps % opt.eval_interval == 0:
 					agent.explore_noise *= opt.explore_noise_decay
-					ep_r, _, _ = evaluate_policy(eval_env, agent, mode='validation')
-					print(f'EnvName:{BrifEnvName[opt.EnvIdex]}, Steps: {int(total_steps/1000)}k, Episode Reward:{ep_r}')
-					rew.append(np.array(ep_r))
+					ep_r, _, _, _ = evaluate_policy(eval_env, agent, mode='validation')
+					elapsed_time = time.time() - start_time
+					print(f'EnvName:{BrifEnvName[opt.EnvIdex]} , Steps: {int(total_steps/1000)}k, Episode Reward:{ep_r}, Elapsed Time:{elapsed_time}')
+					# rew.append(np.array(ep_r))
 					if ep_r > best_score:
 						agent.save(BrifEnvName[opt.EnvIdex])
 						best_score = ep_r
 
+					elapsed_times.append(elapsed_time)
+					rewards.append(best_score)
+					#mlflow.log_metric("score",ep_r[0])
+					#mlflow.log_metric("time",elapsed_time)
+
+		# with open(f'res/track/track_{BrifEnvName[opt.EnvIdex]}.pkl', 'wb') as f:
+		# 	pickle.dump((elapsed_times, rewards), f)
 		env.close()
 		eval_env.close()
-	# with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-	# 	pickle.dump(act, file)
-	# with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
-	# 	pickle.dump(rew, file)
+	with open(f'res/act_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+		pickle.dump(act, file)
+	with open(f'res/rew_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
+		pickle.dump(rew, file)
 
 
 if __name__ == '__main__':
-	main()
+	main(render=False)

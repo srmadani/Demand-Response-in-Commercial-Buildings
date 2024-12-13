@@ -9,7 +9,8 @@ from datetime import datetime
 import argparse
 from hvac import HVAC
 import pickle
-import plotly.graph_objects as go
+import time
+import os
 
 def evaluate_policy(env, model, mode='validation'):
 	if mode == 'validation':
@@ -199,7 +200,8 @@ parser.add_argument('--render', type=str2bool, default=False, help='Render or No
 parser.add_argument('--Loadmodel', type=str2bool, default=False, help='Load pretrained model or Not')
 
 parser.add_argument('--seed', type=int, default=0, help='random seed')
-parser.add_argument('--Max_train_steps', type=int, default=int(4e5), help='Max training steps')
+parser.add_argument('--Max_train_steps', type=int, default=int(1e5), help='Max training steps')
+parser.add_argument('--Max_train_time', type=int, default=int(2e5), help='Max training time')
 parser.add_argument('--buffer_size', type=int, default=int(2e5), help='size of the replay buffer')
 parser.add_argument('--save_interval', type=int, default=int(5e4), help='Model saving interval, in steps.')
 parser.add_argument('--eval_interval', type=int, default=int(2e3), help='Model evaluating interval, in steps.')
@@ -225,11 +227,12 @@ opt = parser.parse_args()
 # print(opt)
 
 
-def main(C=100, R=2, h=80, alpha=1, render=False, compare=False):
-	EnvName = [f'HVAC_D3QN_C_{C}_R_{R}_h_{h}_alpha_{alpha}']
-	BriefEnvName = [f'HVAC_D3QN_{C}_{R}_{h}_{alpha}']
-	env = HVAC(C=C, R=R, h=h, alpha=alpha)
-	eval_env = HVAC(C=C, R=R, h=h, alpha=alpha)
+def main(C=100, R=1, h=50, alpha=0.2, render=False, compare=False, gamma=0.55132, cpp = 0.000067, temperature=0):
+	start_time = time.time()
+	EnvName = [f'HVAC_D3QN_C_{C}_R_{R}_h_{h}_alpha_{alpha}_gamma_{gamma}']
+	BriefEnvName = [f'HVAC_D3QN_{C}_{R}_{h}_{alpha}_{gamma}']
+	env = HVAC(C=C, R=R, h=h, alpha=alpha, gamma=gamma)
+	eval_env = HVAC(C=C, R=R, h=h, alpha=alpha, gamma=gamma)
 	opt.state_dim = env.observation_space.shape[0]
 	opt.action_dim = env.action_space.n
 	opt.max_e_steps = env.T
@@ -269,8 +272,14 @@ def main(C=100, R=2, h=80, alpha=1, render=False, compare=False):
 		score, _ = evaluate_policy(eval_env, model, mode='validation')
 		return score
 	else:
-		total_steps, tin, rew, best_score = 0, [], [], -np.inf
-		while total_steps < opt.Max_train_steps:
+		log_dir = os.path.join("res", "log")
+		log_file_name = f"training_log_{BriefEnvName[opt.EnvIdex]}.txt"
+		log_file_path = os.path.join(log_dir, log_file_name)
+		elapsed_times = []
+		rewards = []
+		total_steps, elapsed_time, tin, rew, best_score = 0, 0, [], [], -np.inf
+		# while total_steps < opt.Max_train_steps:
+		while elapsed_time < opt.Max_train_time:
 			s = env.reset(week_num=np.random.randint(1,7))
 			a, q_a = model.select_action(s, deterministic=False)
 
@@ -306,7 +315,13 @@ def main(C=100, R=2, h=80, alpha=1, render=False, compare=False):
 						model.save(BriefEnvName[opt.EnvIdex])
 						best_score = score
 
-					print('EnvName:',EnvName[opt.EnvIdex],'seed:',opt.seed,'steps: {}k'.format(int(total_steps/1000)),'score:', int(score))
+					elapsed_time = time.time() - start_time
+					elapsed_times.append(elapsed_time)
+					rewards.append(best_score)
+					log_message = f"EnvName: {EnvName[opt.EnvIdex]}, seed: {opt.seed}, steps: {int(total_steps / 1000)}k, score: {int(score)}, elapsed time: {int(elapsed_time)}\n"
+					with open(log_file_path, "a") as log_file:
+						log_file.write(log_message)
+					print(log_message)
 
 				total_steps += 1
 
@@ -316,6 +331,8 @@ def main(C=100, R=2, h=80, alpha=1, render=False, compare=False):
 
 				if done: break
 
+		with open(f'res/track/track_{EnvName[opt.EnvIdex]}.pkl', 'wb') as f:
+			pickle.dump((elapsed_times, rewards), f)
 		env.close()
 		eval_env.close()
 		# with open(f'res/tin_{EnvName[opt.EnvIdex]}.pkl', 'wb') as file:
@@ -324,4 +341,4 @@ def main(C=100, R=2, h=80, alpha=1, render=False, compare=False):
 		# 	pickle.dump(rew, file)
 
 if __name__ == '__main__':
-	main()
+	main(render=True)
